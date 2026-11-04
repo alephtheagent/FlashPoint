@@ -11,6 +11,7 @@ import com.p0lymatic.flashpoint.core.RawImageBurner
 import com.p0lymatic.flashpoint.core.VentoyInstallProgress
 import com.p0lymatic.flashpoint.core.VentoyInstaller
 import com.p0lymatic.flashpoint.core.VentoyRelease
+import com.p0lymatic.flashpoint.core.VentoyPhase
 import com.p0lymatic.flashpoint.usb.UsbConnectionState
 import com.p0lymatic.flashpoint.usb.UsbDeviceMonitor
 import com.p0lymatic.flashpoint.usb.UsbMassStorageStreamer
@@ -56,6 +57,15 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _ventoyInstallProgress = MutableStateFlow<VentoyInstallProgress?>(null)
     val ventoyInstallProgress: StateFlow<VentoyInstallProgress?> = _ventoyInstallProgress.asStateFlow()
+    private val _doneMetrics = MutableStateFlow<DoneMetrics?>(null)
+    val doneMetrics: StateFlow<DoneMetrics?> = _doneMetrics.asStateFlow()
+
+    fun resetDoneState() {
+        _doneMetrics.value = null
+        _burnProgress.value = null
+        _ventoyInstallProgress.value = null
+        _isBurning.value = false
+    }
 
     val isCheckingVentoy = MutableStateFlow(false)
     val isDownloadingOfflineVentoy = MutableStateFlow(false)
@@ -84,10 +94,11 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
         val uri = selectedImageUri.value ?: return
         val connected = usbState.value as? UsbConnectionState.Connected ?: return
         if (_isBurning.value) return
-
+        val startTime = System.currentTimeMillis()
         burnJob = viewModelScope.launch(Dispatchers.IO) {
             _isBurning.value = true
             _burnProgress.value = null
+            _doneMetrics.value = null
             try {
                 val app = getApplication<Application>()
                 val usbManager = app.getSystemService(android.content.Context.USB_SERVICE)
@@ -98,6 +109,27 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
                     val burner = RawImageBurner(app.contentResolver, streamer)
                     burner.burn(uri, connected.capacityBytes).collect { progress ->
                         _burnProgress.value = progress
+                        if (progress.phase == com.p0lymatic.flashpoint.core.BurnPhase.COMPLETED) {
+                            val elapsedMs = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
+                            val elapsedSec = elapsedMs / 1000.0
+                            val speedMBs = if (elapsedSec > 0) (progress.totalBytes / elapsedSec) / (1024.0 * 1024.0) else 0.0
+                            val formattedTime = "%02d:%02d".format(elapsedMs / 60000, (elapsedMs % 60000) / 1000)
+                            val activeDev = connected.device
+                            val devName = listOfNotNull(activeDev.manufacturerName, activeDev.productName)
+                                .filter { it.isNotBlank() }
+                                .joinToString(" ")
+                                .ifEmpty { activeDev.deviceName }
+                            val devCap = formatBytes(connected.capacityBytes)
+                            val imageName = selectedImageName.value ?: "Raw Disk Image"
+
+                            _doneMetrics.value = DoneMetrics(
+                                driveNameAndSize = "$devName ($devCap)".trim(),
+                                targetOrImageName = imageName,
+                                schemeAndArchitecture = "Raw / Native",
+                                averageSpeed = "%.1f MB/s".format(speedMBs),
+                                elapsedTime = formattedTime
+                            )
+                        }
                     }
                 } finally {
                     streamer.close()
@@ -220,6 +252,14 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
         val release = _ventoyRelease.value ?: return
         val connected = usbState.value as? UsbConnectionState.Connected ?: return
 
+        val activeDev = connected.device
+        val devName = listOfNotNull(activeDev.manufacturerName, activeDev.productName)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .ifEmpty { activeDev.deviceName }
+        val devCap = formatBytes(connected.capacityBytes)
+
+        _doneMetrics.value = null
         ventoyJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val app = getApplication<Application>()
@@ -231,10 +271,26 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
                     val ventoyDir = File(app.filesDir, "ventoy_cache")
                     if (!ventoyDir.exists()) ventoyDir.mkdirs()
                     val installer = VentoyInstaller(OkHttpClient(), ventoyDir)
-                    installer.install(release, streamer, selectedPartitionScheme.value)
-                        .collect { progress ->
-                            _ventoyInstallProgress.value = progress
+                    installer.install(
+                        release = release,
+                        streamer = streamer,
+                        scheme = selectedPartitionScheme.value,
+                        arch = selectedArchitecture.value,
+                        driveName = devName,
+                        driveCapacity = devCap
+                    ).collect { progress ->
+                        _ventoyInstallProgress.value = progress
+                        if (progress.phase == VentoyPhase.COMPLETED && progress.metrics != null) {
+                            val m = progress.metrics
+                            _doneMetrics.value = DoneMetrics(
+                                driveNameAndSize = "${m.driveName} (${m.driveCapacity})".trim(),
+                                targetOrImageName = "Ventoy ${m.ventoyVersion}",
+                                schemeAndArchitecture = "${m.partitionScheme} (${m.targetArchitecture})",
+                                averageSpeed = "%.1f MB/s".format(m.averageSpeedMBs),
+                                elapsedTime = m.formattedDuration
+                            )
                         }
+                    }
                     checkOfflineVentoyStatus(release)
                 } finally {
                     streamer.close()
@@ -256,5 +312,13 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
         usbMonitor.unregister()
         burnJob?.cancel()
         ventoyJob?.cancel()
+    }
+}
+fun formatBytes(bytes: Long): String {
+    return when {
+        bytes >= 1_000_000_000L -> "%.1f GB".format(bytes / 1_000_000_000.0)
+        bytes >= 1_000_000L -> "%.1f MB".format(bytes / 1_000_000.0)
+        bytes >= 1_000L -> "%.1f KB".format(bytes / 1_000.0)
+        else -> "$bytes B"
     }
 }

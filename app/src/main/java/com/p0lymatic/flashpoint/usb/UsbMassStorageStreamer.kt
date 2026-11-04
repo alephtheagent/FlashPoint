@@ -10,7 +10,7 @@ import java.nio.ByteOrder
 
 class UsbMassStorageStreamer(
     private val usbManager: UsbManager,
-    private val device: UsbDevice
+    val device: UsbDevice
 ) {
     private lateinit var connection: UsbDeviceConnection
     private lateinit var bulkIn: UsbEndpoint
@@ -288,6 +288,30 @@ class UsbMassStorageStreamer(
             )
         }
     }
+    fun readSectors(lba: Long, sectorCount: Int): ByteArray {
+        val transferLength = sectorCount * blockSize
+        val cdb: ByteArray
+        if (lba < 0x100000000L && sectorCount <= 0xFFFF) {
+            // READ(10) — opcode 0x28
+            cdb = ByteArray(10)
+            cdb[0] = 0x28.toByte()
+            ByteBuffer.wrap(cdb).order(ByteOrder.BIG_ENDIAN).apply {
+                putInt(2, lba.toInt())
+                putShort(7, sectorCount.toShort())
+            }
+        } else {
+            // READ(16) — opcode 0x88
+            cdb = ByteArray(16)
+            cdb[0] = 0x88.toByte()
+            ByteBuffer.wrap(cdb).order(ByteOrder.BIG_ENDIAN).apply {
+                putLong(2, lba)
+                putInt(10, sectorCount)
+            }
+        }
+        return sendCommand(cdb, transferLength, dataIn = true)
+            ?: throw UsbCommandException("READ command returned null")
+    }
+
 
     fun getCapacity(): Pair<Long, Int> {
         val (lba10, bs10) = readCapacity10()

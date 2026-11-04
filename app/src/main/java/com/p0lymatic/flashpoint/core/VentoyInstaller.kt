@@ -31,14 +31,25 @@ enum class TargetArchitecture { X86_64, IA32, ARM64 }
 
 enum class PartitionScheme { MBR, GPT }
 
+data class VentoyCompletionMetrics(
+    val durationMillis: Long,
+    val formattedDuration: String,
+    val averageSpeedMBs: Double,
+    val targetArchitecture: String,
+    val ventoyVersion: String,
+    val partitionScheme: String,
+    val driveName: String,
+    val driveCapacity: String
+)
+
 data class VentoyInstallProgress(
     val phase: VentoyPhase,
     val progressPercent: Float,
-    val message: String
+    val message: String,
+    val metrics: VentoyCompletionMetrics? = null
 )
 
-enum class VentoyPhase { FETCHING_RELEASE, DOWNLOADING, PARTITIONING, WRITING_BOOTLOADER, COMPLETED, FAILED }
-
+enum class VentoyPhase { FETCHING_RELEASE, DOWNLOADING, PARTITIONING, WRITING_BOOTLOADER, VERIFYING, COMPLETED, FAILED }
 class VentoyInstaller(
     private val httpClient: OkHttpClient,
     private val cacheDir: File
@@ -116,8 +127,13 @@ class VentoyInstaller(
     fun install(
         release: VentoyRelease,
         streamer: UsbMassStorageStreamer,
-        scheme: PartitionScheme
+        scheme: PartitionScheme,
+        arch: TargetArchitecture = TargetArchitecture.X86_64,
+        driveName: String = "",
+        driveCapacity: String = ""
     ): Flow<VentoyInstallProgress> = flow {
+        val startTime = System.currentTimeMillis()
+        var totalBytesWritten = 0L
         try {
             // Phase 1: Download
             emit(
@@ -160,6 +176,7 @@ class VentoyInstaller(
                     withContext(Dispatchers.IO) {
                         streamer.writeSectors(0L, 1, mbr)
                     }
+                    totalBytesWritten += mbr.size
                 }
                 PartitionScheme.GPT -> {
                     val gptBuffers = buildGptLayout(totalSectors, blockSize)
@@ -177,6 +194,7 @@ class VentoyInstaller(
                         // Backup GPT header at last LBA
                         streamer.writeSectors(totalSectors - 1, 1, gptBuffers[4])
                     }
+                    totalBytesWritten += gptBuffers[0].size + gptBuffers[1].size + gptBuffers[2].size + gptBuffers[3].size + gptBuffers[4].size
                 }
             }
 
@@ -209,9 +227,10 @@ class VentoyInstaller(
                 }
             }
 
-            withContext(Dispatchers.IO) {
+            val bootBytes = withContext(Dispatchers.IO) {
                 writeFat16BootPartition(streamer, part2StartLba, part2SizeSectors)
             }
+            totalBytesWritten += bootBytes
 
             emit(
                 VentoyInstallProgress(
@@ -221,11 +240,105 @@ class VentoyInstaller(
                 )
             )
 
+            coroutineContext.ensureActive()
+
+            // Phase 4: Verifying installation integrity
+            emit(
+                VentoyInstallProgress(
+                    phase = VentoyPhase.VERIFYING,
+                    progressPercent = 98f,
+                    message = "Verifying installation integrity..."
+                )
+            )
+
+            withContext(Dispatchers.IO) {
+                // Read back sector 0 (MBR)
+                val mbr = streamer.readSectors(0L, 1)
+                if (mbr.size < 512) {
+                    throw IllegalStateException("Read MBR returned incomplete sector: ${mbr.size} bytes")
+                }
+                val sig55 = mbr[510].toInt() and 0xFF
+                val sigAA = mbr[511].toInt() and 0xFF
+                if (sig55 != 0x55 || sigAA != 0xAA) {
+                    throw IllegalStateException(
+                        "Invalid MBR boot signature at offset 510..511: expected 0x55 0xAA, found 0x%02X 0x%02X".format(sig55, sigAA)
+                    )
+                }
+
+                // Check partition table validity and Ventoy signatures
+                when (scheme) {
+                    PartitionScheme.MBR -> {
+                        val p1Type = mbr[0x1BE + 4].toInt() and 0xFF
+                        val p2Type = mbr[0x1CE + 4].toInt() and 0xFF
+                        if (p1Type != 0x07 || p2Type != 0x0E) {
+                            throw IllegalStateException(
+                                "Invalid MBR partition table types: part1=0x%02X (expected 0x07), part2=0x%02X (expected 0x0E)".format(p1Type, p2Type)
+                            )
+                        }
+                    }
+                    PartitionScheme.GPT -> {
+                        val protType = mbr[0x1BE + 4].toInt() and 0xFF
+                        if (protType != 0xEE) {
+                            throw IllegalStateException(
+                                "Invalid GPT protective MBR partition type: 0x%02X (expected 0xEE)".format(protType)
+                            )
+                        }
+                        // Check GPT header at LBA 1
+                        val gptHeader = streamer.readSectors(1L, 1)
+                        val gptSig = String(gptHeader.copyOfRange(0, 8), Charsets.US_ASCII)
+                        if (gptSig != "EFI PART") {
+                            throw IllegalStateException("Invalid GPT signature at LBA 1: expected 'EFI PART', found '$gptSig'")
+                        }
+                    }
+                }
+
+                // Check VTOYEFI partition at part2StartLba
+                val part2Boot = streamer.readSectors(part2StartLba, 1)
+                val p2Sig55 = part2Boot[510].toInt() and 0xFF
+                val p2SigAA = part2Boot[511].toInt() and 0xFF
+                if (p2Sig55 != 0x55 || p2SigAA != 0xAA) {
+                    throw IllegalStateException(
+                        "Invalid VTOYEFI boot signature: expected 0x55 0xAA, found 0x%02X 0x%02X".format(p2Sig55, p2SigAA)
+                    )
+                }
+                val label = String(part2Boot.copyOfRange(0x2B, 0x2B + 7), Charsets.US_ASCII)
+                if (label != "VTOYEFI") {
+                    throw IllegalStateException("Invalid VTOYEFI volume label: expected 'VTOYEFI', found '$label'")
+                }
+            }
+
+            coroutineContext.ensureActive()
+
+            // Detailed completion metrics
+            val durationMillis = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
+            val elapsedSeconds = durationMillis / 1000.0
+            val averageSpeedMBs = if (elapsedSeconds > 0) (totalBytesWritten / elapsedSeconds) / (1024.0 * 1024.0) else 0.0
+            val formattedDuration = "%02d:%02d".format(durationMillis / 60000, (durationMillis % 60000) / 1000)
+            val archString = when (arch) {
+                TargetArchitecture.X86_64 -> "x86_64"
+                TargetArchitecture.IA32 -> "IA32"
+                TargetArchitecture.ARM64 -> "ARM64"
+            }
+            val resolvedDriveName = if (driveName.isNotBlank()) driveName else "USB Storage"
+            val resolvedDriveCapacity = if (driveCapacity.isNotBlank()) driveCapacity else ""
+
+            val metrics = VentoyCompletionMetrics(
+                durationMillis = durationMillis,
+                formattedDuration = formattedDuration,
+                averageSpeedMBs = averageSpeedMBs,
+                targetArchitecture = archString,
+                ventoyVersion = release.version,
+                partitionScheme = scheme.name,
+                driveName = resolvedDriveName,
+                driveCapacity = resolvedDriveCapacity
+            )
+
             emit(
                 VentoyInstallProgress(
                     phase = VentoyPhase.COMPLETED,
                     progressPercent = 100f,
-                    message = "Ventoy ${release.version} installed successfully"
+                    message = "Ventoy ${release.version} verified & installed successfully",
+                    metrics = metrics
                 )
             )
         } catch (e: CancellationException) {
@@ -424,7 +537,8 @@ class VentoyInstaller(
         streamer: UsbMassStorageStreamer,
         startLba: Long,
         sizeInSectors: Long
-    ) {
+    ): Long {
+        var bytesWritten = 0L
         val blockSize = streamer.blockSize
         val reservedSectors = 1
         val numberOfFats = 2
@@ -504,6 +618,8 @@ class VentoyInstaller(
         rdBuf.put(0x08.toByte())                        // Attribute: volume label
 
         streamer.writeSectors(rootDirStart, rootDirSectors, rootDir)
+        bytesWritten += bootSector.size + (fatBytes.size * 2) + rootDir.size
+        return bytesWritten
     }
 
     private fun encodeChs(buf: ByteBuffer, lba: Long) {

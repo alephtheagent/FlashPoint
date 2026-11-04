@@ -5,8 +5,13 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
@@ -33,6 +38,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
@@ -83,14 +91,7 @@ import com.p0lymatic.flashpoint.core.PartitionScheme
 import com.p0lymatic.flashpoint.core.VentoyPhase
 import com.p0lymatic.flashpoint.usb.UsbConnectionState
 
-private fun formatBytes(bytes: Long): String {
-    return when {
-        bytes >= 1_000_000_000L -> "%.1f GB".format(bytes / 1_000_000_000.0)
-        bytes >= 1_000_000L -> "%.1f MB".format(bytes / 1_000_000.0)
-        bytes >= 1_000L -> "%.1f KB".format(bytes / 1_000.0)
-        else -> "$bytes B"
-    }
-}
+
 
 private fun formatTime(seconds: Long): String {
     val m = seconds / 60
@@ -109,6 +110,14 @@ fun MainScreen(viewModel: FlashPointViewModel) {
 
     if (showAboutScreen) {
         AboutScreen(onBack = { showAboutScreen = false })
+        return
+    }
+    val doneMetrics by viewModel.doneMetrics.collectAsStateWithLifecycle()
+    if (doneMetrics != null) {
+        DoneScreen(
+            metrics = doneMetrics!!,
+            onFinish = { viewModel.resetDoneState() }
+        )
         return
     }
     val context = LocalContext.current
@@ -517,10 +526,22 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                 }
             }
 
-            // Mode Options Container with Smooth Crossfade
-            Crossfade(
+            // Mode Options Container with Smooth Directional Slide Animations
+            AnimatedContent(
                 targetState = selectedTab,
-                label = "optionsCrossfade"
+                transitionSpec = {
+                    if (targetState > initialState) {
+                        // Moving Image (0) -> Ventoy (1): slide out left, slide in from right
+                        (slideInHorizontally(animationSpec = tween(240)) { width -> width } + fadeIn(animationSpec = tween(240)))
+                            .togetherWith(slideOutHorizontally(animationSpec = tween(240)) { width -> -width } + fadeOut(animationSpec = tween(240)))
+                    } else {
+                        // Moving Ventoy (1) -> Image (0): slide out right, slide in from left
+                        (slideInHorizontally(animationSpec = tween(240)) { width -> -width } + fadeIn(animationSpec = tween(240)))
+                            .togetherWith(slideOutHorizontally(animationSpec = tween(240)) { width -> width } + fadeOut(animationSpec = tween(240)))
+                    }.using(SizeTransform(clip = false))
+                },
+                label = "tabAnimatedContent",
+                modifier = Modifier.fillMaxWidth()
             ) { tab ->
                 if (tab == 0) {
                     Card(
@@ -674,38 +695,53 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                                             )
                                         }
 
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            if (offlineReady) {
-                                                Surface(
-                                                    shape = RoundedCornerShape(12.dp),
-                                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                                    modifier = Modifier.size(36.dp)
-                                                ) {
-                                                    Box(contentAlignment = Alignment.Center) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.Done,
-                                                            contentDescription = "Cached offline",
-                                                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                            modifier = Modifier.size(20.dp)
-                                                        )
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.size(40.dp)
+                                        ) {
+                                            when {
+                                                offlineReady -> {
+                                                    Surface(
+                                                        shape = CircleShape,
+                                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                                        modifier = Modifier.size(40.dp)
+                                                    ) {
+                                                        Box(contentAlignment = Alignment.Center) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Check,
+                                                                contentDescription = "Offline ready",
+                                                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                                modifier = Modifier.size(20.dp)
+                                                            )
+                                                        }
                                                     }
                                                 }
-                                            } else {
-                                                FilledTonalButton(
-                                                    onClick = { viewModel.downloadOfflineVentoy() },
-                                                    enabled = !isDownloadingOffline,
-                                                    shape = RoundedCornerShape(16.dp)
-                                                ) {
-                                                    if (isDownloadingOffline) {
-                                                        CircularProgressIndicator(
-                                                            strokeWidth = 2.dp,
-                                                            modifier = Modifier.size(14.dp),
-                                                            color = MaterialTheme.colorScheme.primary
+                                                isDownloadingOffline -> {
+                                                    Surface(
+                                                        shape = CircleShape,
+                                                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                                        modifier = Modifier.size(40.dp)
+                                                    ) {
+                                                        Box(contentAlignment = Alignment.Center) {
+                                                            CircularProgressIndicator(
+                                                                strokeWidth = 2.5.dp,
+                                                                modifier = Modifier.size(20.dp),
+                                                                color = MaterialTheme.colorScheme.primary
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                else -> {
+                                                    FilledTonalIconButton(
+                                                        onClick = { viewModel.downloadOfflineVentoy() },
+                                                        modifier = Modifier.size(40.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.ArrowDownward,
+                                                            contentDescription = "Download Ventoy offline",
+                                                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                            modifier = Modifier.size(20.dp)
                                                         )
-                                                        Spacer(modifier = Modifier.width(6.dp))
-                                                        Text("Saving...")
-                                                    } else {
-                                                        Text("Save")
                                                     }
                                                 }
                                             }
@@ -956,7 +992,12 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                     }
                 } else {
                     val vp = ventoyProgress
-                    val fraction = if (vp != null) (vp.progressPercent / 100f).coerceIn(0f, 1f) else 0f
+                    val rawFraction = if (vp != null) {
+                        if (vp.progressPercent <= 1.0f) vp.progressPercent else (vp.progressPercent / 100f)
+                    } else {
+                        0f
+                    }
+                    val fraction = rawFraction.coerceIn(0f, 1f)
                     val percent = (fraction * 100).toInt()
 
                     Text(
@@ -965,6 +1006,7 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                             VentoyPhase.DOWNLOADING -> "Downloading Package"
                             VentoyPhase.PARTITIONING -> "Creating Partitions"
                             VentoyPhase.WRITING_BOOTLOADER -> "Installing Bootloader"
+                            VentoyPhase.VERIFYING -> "Verifying Integrity"
                             VentoyPhase.COMPLETED -> "Installed"
                             VentoyPhase.FAILED -> "Failed"
                             null -> "Starting"
