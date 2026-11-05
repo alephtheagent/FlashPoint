@@ -63,6 +63,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -90,7 +91,7 @@ import com.p0lymatic.flashpoint.core.BurnPhase
 import com.p0lymatic.flashpoint.core.PartitionScheme
 import com.p0lymatic.flashpoint.core.VentoyPhase
 import com.p0lymatic.flashpoint.usb.UsbConnectionState
-
+import com.p0lymatic.flashpoint.usb.VirtualDriveMode
 
 
 private fun formatTime(seconds: Long): String {
@@ -109,7 +110,7 @@ fun MainScreen(viewModel: FlashPointViewModel) {
     }
 
     if (showAboutScreen) {
-        AboutScreen(onBack = { showAboutScreen = false })
+        AboutScreen(viewModel = viewModel, onBack = { showAboutScreen = false })
         return
     }
     val doneMetrics by viewModel.doneMetrics.collectAsStateWithLifecycle()
@@ -117,6 +118,15 @@ fun MainScreen(viewModel: FlashPointViewModel) {
         DoneScreen(
             metrics = doneMetrics!!,
             onFinish = { viewModel.resetDoneState() }
+        )
+        return
+    }
+
+    val failedDetails by viewModel.failedDetails.collectAsStateWithLifecycle()
+    if (failedDetails != null) {
+        FailedScreen(
+            details = failedDetails!!,
+            onDismiss = { viewModel.resetFailedState() }
         )
         return
     }
@@ -138,7 +148,8 @@ fun MainScreen(viewModel: FlashPointViewModel) {
     val isDownloadingOffline by viewModel.isDownloadingOfflineVentoy.collectAsStateWithLifecycle()
     val offlineReady by viewModel.offlineVentoyFileExists.collectAsStateWithLifecycle()
     val showCancelDialog by viewModel.showCancelDialog.collectAsStateWithLifecycle()
-
+    val isDemoModeEnabled by viewModel.isDemoModeEnabled.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -165,12 +176,29 @@ fun MainScreen(viewModel: FlashPointViewModel) {
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = "FlashPoint",
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = (-0.5).sp,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "FlashPoint",
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.5).sp,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        if (isDemoModeEnabled) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.tertiaryContainer
+                            ) {
+                                Text(
+                                    text = "DEMO",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
                 },
                 actions = {
                     Surface(
@@ -242,14 +270,15 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (availableDevices.size > 1) {
+                            val totalDrives = availableDevices.size + (if (isDemoModeEnabled) 3 else 0)
+                            if (totalDrives > 1) {
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Surface(
                                     shape = RoundedCornerShape(10.dp),
                                     color = MaterialTheme.colorScheme.primaryContainer
                                 ) {
                                     Text(
-                                        text = "${availableDevices.size} drives",
+                                        text = "$totalDrives drives",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Medium,
                                         color = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -276,7 +305,7 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                     // Device Selector Dropdown (if multiple devices or dropdown trigger is clicked)
                     var deviceDropdownExpanded by remember { mutableStateOf(false) }
 
-                    if (availableDevices.isNotEmpty()) {
+                    if (availableDevices.isNotEmpty() || isDemoModeEnabled) {
                         Box(modifier = Modifier.fillMaxWidth()) {
                             Surface(
                                 onClick = { deviceDropdownExpanded = true },
@@ -291,14 +320,27 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    val currentConnectedDevice = (usbState as? UsbConnectionState.Connected)?.device
-                                    val activeDevice = currentConnectedDevice ?: availableDevices.firstOrNull()
-                                    val activeName = activeDevice?.let { dev ->
-                                        listOfNotNull(dev.manufacturerName, dev.productName)
-                                            .filter { it.isNotBlank() }
-                                            .joinToString(" ")
-                                            .ifEmpty { dev.deviceName }
-                                    } ?: "Select Device"
+                                    val currentConnected = (usbState as? UsbConnectionState.Connected)
+                                    val activeName = if (currentConnected != null) {
+                                        if (currentConnected.isVirtual) {
+                                            "${currentConnected.vendor} ${currentConnected.model}".trim()
+                                        } else {
+                                            val dev = currentConnected.device
+                                            dev?.let {
+                                                listOfNotNull(it.manufacturerName, it.productName)
+                                                    .filter { n -> n.isNotBlank() }
+                                                    .joinToString(" ")
+                                                    .ifEmpty { it.deviceName }
+                                            } ?: "Select Device"
+                                        }
+                                    } else {
+                                        availableDevices.firstOrNull()?.let { dev ->
+                                            listOfNotNull(dev.manufacturerName, dev.productName)
+                                                .filter { n -> n.isNotBlank() }
+                                                .joinToString(" ")
+                                                .ifEmpty { dev.deviceName }
+                                        } ?: "Select Device"
+                                    }
 
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
@@ -329,8 +371,65 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                                 onDismissRequest = { deviceDropdownExpanded = false },
                                 modifier = Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh)
                             ) {
+                                val currentConnected = (usbState as? UsbConnectionState.Connected)
+                                if (isDemoModeEnabled) {
+                                    val virtualDrives = listOf(
+                                        Triple(
+                                            VirtualDriveMode.SUCCESS,
+                                            "Virtual RAM Disk (Success)",
+                                            "1.0 GB"
+                                        ),
+                                        Triple(
+                                            VirtualDriveMode.IO_ERROR,
+                                            "Virtual RAM Disk (I/O Error @ 60%)",
+                                            "1.0 GB"
+                                        ),
+                                        Triple(
+                                            VirtualDriveMode.VERIFY_FAILURE,
+                                            "Virtual RAM Disk (Corrupt MBR on Verify)",
+                                            "1.0 GB"
+                                        )
+                                    )
+                                    virtualDrives.forEach { (mode, title, cap) ->
+                                        val isSelected = currentConnected?.isVirtual == true && currentConnected.virtualMode == mode
+                                        DropdownMenuItem(
+                                            text = {
+                                                Column {
+                                                    Text(
+                                                        text = "$title - $cap",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                        color = MaterialTheme.colorScheme.onSurface
+                                                    )
+                                                    Text(
+                                                        text = "Emulated RAM Disk (${mode.name})",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            },
+                                            trailingIcon = if (isSelected) {
+                                                {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Check,
+                                                        contentDescription = "Selected",
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            } else null,
+                                            onClick = {
+                                                viewModel.selectVirtualDevice(mode)
+                                                deviceDropdownExpanded = false
+                                            }
+                                        )
+                                    }
+                                    if (availableDevices.isNotEmpty()) {
+                                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                    }
+                                }
+
                                 availableDevices.forEach { dev ->
-                                    val isSelected = (usbState as? UsbConnectionState.Connected)?.device?.deviceId == dev.deviceId
+                                    val isSelected = currentConnected?.isVirtual != true && currentConnected?.device?.deviceId == dev.deviceId
                                     val devName = listOfNotNull(dev.manufacturerName, dev.productName)
                                         .filter { it.isNotBlank() }
                                         .joinToString(" ")
@@ -408,8 +507,7 @@ fun MainScreen(viewModel: FlashPointViewModel) {
                                 color = MaterialTheme.colorScheme.surfaceContainerHighest
                             ) {
                                 Text(
-                                    text = "USB Mass Storage (SCSI BOT)",
-                                    style = MaterialTheme.typography.labelSmall,
+                                    text = if (state.isVirtual) "Virtual RAM Disk (Emulated SCSI)" else "USB Mass Storage (SCSI BOT)",
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
@@ -891,8 +989,9 @@ fun MainScreen(viewModel: FlashPointViewModel) {
             Spacer(modifier = Modifier.height(8.dp))
 
             // Primary Action Button
-            val canStartRaw = isConnected && selectedImageUri != null && !isBusy
-            val canStartVentoy = isConnected && ventoyRelease != null && !isBusy
+            val isVirtual = (usbState as? UsbConnectionState.Connected)?.isVirtual == true
+            val canStartRaw = isConnected && (selectedImageUri != null || (isDemoModeEnabled && isVirtual)) && !isBusy
+            val canStartVentoy = isConnected && (ventoyRelease != null || (isDemoModeEnabled && isVirtual)) && !isBusy
 
             Button(
                 onClick = {
@@ -1068,6 +1167,34 @@ fun MainScreen(viewModel: FlashPointViewModel) {
             dismissButton = {
                 TextButton(onClick = { viewModel.showCancelDialog.value = false }) {
                     Text("Keep Writing")
+                }
+            },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        )
+    }
+
+    if (errorMessage != null) {
+        AlertDialog(
+            onDismissRequest = { viewModel.clearError() },
+            title = {
+                Text(
+                    text = "Operation Failed",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.error
+                )
+            },
+            text = {
+                Text(
+                    text = errorMessage!!,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.clearError() }) {
+                    Text("Dismiss", fontWeight = FontWeight.Bold)
                 }
             },
             shape = RoundedCornerShape(24.dp),

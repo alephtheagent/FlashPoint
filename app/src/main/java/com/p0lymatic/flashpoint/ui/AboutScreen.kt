@@ -29,7 +29,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.Switch
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.p0lymatic.flashpoint.BuildConfig
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,7 +56,7 @@ private data class Contributor(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AboutScreen(onBack: () -> Unit) {
+fun AboutScreen(viewModel: FlashPointViewModel? = null, onBack: () -> Unit) {
     val uriHandler = LocalUriHandler.current
 
     val contributors = listOf(
@@ -148,7 +151,7 @@ fun AboutScreen(onBack: () -> Unit) {
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Version 1.0.5 (GPL-3.0)",
+                        text = "Version 1.0.6 (GPL-3.0)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -251,6 +254,49 @@ fun AboutScreen(onBack: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+                }
+            }
+
+            if (BuildConfig.DEBUG) {
+                val isDemoModeEnabled = viewModel?.isDemoModeEnabled?.collectAsStateWithLifecycle()?.value ?: false
+                Card(
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 16.dp)
+                        ) {
+                            Text(
+                                text = "Developer Demo Mode",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Emulate virtual USB storage & test workflows without OTG hardware",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Switch(
+                            checked = isDemoModeEnabled,
+                            onCheckedChange = { viewModel?.setDemoModeEnabled(it) }
+                        )
                     }
                 }
             }

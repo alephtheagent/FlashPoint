@@ -8,28 +8,30 @@ import android.hardware.usb.UsbManager
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-class UsbMassStorageStreamer(
-    private val usbManager: UsbManager,
-    val device: UsbDevice
-) {
+open class UsbMassStorageStreamer(
+    private val usbManager: UsbManager? = null,
+    open val device: UsbDevice? = null
+) : AutoCloseable {
     private lateinit var connection: UsbDeviceConnection
     private lateinit var bulkIn: UsbEndpoint
     private lateinit var bulkOut: UsbEndpoint
     private var tag: Int = 0
-    var blockSize: Int = 512
-        private set
-    var lastLba: Long = 0
-        private set
-    val totalSectors: Long get() = lastLba + 1
+    open var blockSize: Int = 512
+        protected set
+    open var lastLba: Long = 0
+        protected set
+    open val totalSectors: Long get() = lastLba + 1
 
-    fun open() {
-        val conn = usbManager.openDevice(device)
+    open fun open() {
+        val mgr = usbManager ?: throw IllegalStateException("UsbManager not initialized")
+        val dev = device ?: throw IllegalStateException("UsbDevice not initialized")
+        val conn = mgr.openDevice(dev)
             ?: throw IllegalStateException("Cannot open USB device connection")
         connection = conn
 
         var foundInterface = false
-        for (i in 0 until device.interfaceCount) {
-            val iface = device.getInterface(i)
+        for (i in 0 until dev.interfaceCount) {
+            val iface = dev.getInterface(i)
             if (iface.interfaceClass == MASS_STORAGE_CLASS &&
                 iface.interfaceSubclass == SCSI_SUBCLASS &&
                 iface.interfaceProtocol == BOT_PROTOCOL
@@ -62,13 +64,16 @@ class UsbMassStorageStreamer(
         }
     }
 
-    fun close() {
+    open override fun close() {
         if (::connection.isInitialized) {
-            for (i in 0 until device.interfaceCount) {
-                val iface = device.getInterface(i)
-                if (iface.interfaceClass == MASS_STORAGE_CLASS) {
-                    connection.releaseInterface(iface)
-                    break
+            val dev = device
+            if (dev != null) {
+                for (i in 0 until dev.interfaceCount) {
+                    val iface = dev.getInterface(i)
+                    if (iface.interfaceClass == MASS_STORAGE_CLASS) {
+                        connection.releaseInterface(iface)
+                        break
+                    }
                 }
             }
             connection.close()
@@ -164,14 +169,14 @@ class UsbMassStorageStreamer(
         return data
     }
 
-    fun testUnitReady(): Boolean {
+    open fun testUnitReady(): Boolean {
         val cdb = ByteArray(6) // opcode 0x00
         val sentTag = sendCbw(cdb, 0, false)
         val csw = readCsw(sentTag)
         return csw.status == 0
     }
 
-    fun inquiry(): DeviceInfo {
+    open fun inquiry(): DeviceInfo {
         val cdb = ByteArray(6)
         cdb[0] = 0x12 // INQUIRY opcode
         cdb[4] = 36   // allocation length
@@ -186,7 +191,7 @@ class UsbMassStorageStreamer(
         return DeviceInfo(vendor, product, revision)
     }
 
-    fun readCapacity10(): Pair<Long, Int> {
+    open fun readCapacity10(): Pair<Long, Int> {
         val cdb = ByteArray(10)
         cdb[0] = 0x25.toByte() // READ CAPACITY (10)
 
@@ -203,7 +208,7 @@ class UsbMassStorageStreamer(
         return Pair(returnedLba, returnedBlockSize)
     }
 
-    fun readCapacity16(): Pair<Long, Int> {
+    open fun readCapacity16(): Pair<Long, Int> {
         val cdb = ByteArray(16)
         cdb[0] = 0x9E.toByte() // SERVICE ACTION IN (16)
         cdb[1] = 0x10          // SAI READ CAPACITY (16)
@@ -224,7 +229,7 @@ class UsbMassStorageStreamer(
         return Pair(returnedLba, returnedBlockSize)
     }
 
-    fun requestSense(): SenseData {
+    open fun requestSense(): SenseData {
         val cdb = ByteArray(6)
         cdb[0] = 0x03 // REQUEST SENSE
         cdb[4] = 18   // allocation length
@@ -239,7 +244,7 @@ class UsbMassStorageStreamer(
         return SenseData(senseKey, asc, ascq)
     }
 
-    fun writeSectors(lba: Long, sectorCount: Int, data: ByteArray) {
+    open fun writeSectors(lba: Long, sectorCount: Int, data: ByteArray) {
         require(data.size == sectorCount * blockSize) {
             "Data size ${data.size} != sectorCount $sectorCount * blockSize $blockSize"
         }
@@ -288,7 +293,7 @@ class UsbMassStorageStreamer(
             )
         }
     }
-    fun readSectors(lba: Long, sectorCount: Int): ByteArray {
+    open fun readSectors(lba: Long, sectorCount: Int): ByteArray {
         val transferLength = sectorCount * blockSize
         val cdb: ByteArray
         if (lba < 0x100000000L && sectorCount <= 0xFFFF) {
@@ -313,7 +318,7 @@ class UsbMassStorageStreamer(
     }
 
 
-    fun getCapacity(): Pair<Long, Int> {
+    open fun getCapacity(): Pair<Long, Int> {
         val (lba10, bs10) = readCapacity10()
         return if (lba10 == 0xFFFFFFFFL) {
             readCapacity16()

@@ -19,7 +19,8 @@ data class BurnProgress(
     val bytesPerSecond: Double,
     val etaSeconds: Long,
     val sha256Hex: String,
-    val phase: BurnPhase
+    val phase: BurnPhase,
+    val errorMessage: String? = null
 )
 
 enum class BurnPhase { PREPARING, WRITING, VERIFYING, COMPLETED, CANCELLED, FAILED }
@@ -43,6 +44,8 @@ class RawImageBurner(
 
         var inputStream: InputStream? = null
         var bytesWrittenSoFar = 0L
+        var firstSectorSig55: Int? = null
+        var firstSectorSigAA: Int? = null
         try {
             val digest = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(CHUNK_SIZE)
@@ -62,8 +65,12 @@ class RawImageBurner(
                 }
                 if (bytesRead == -1) break
 
-                digest.update(buffer, 0, bytesRead)
+                if (bytesWrittenSoFar == 0L && bytesRead >= 512) {
+                    firstSectorSig55 = buffer[510].toInt() and 0xFF
+                    firstSectorSigAA = buffer[511].toInt() and 0xFF
+                }
 
+                digest.update(buffer, 0, bytesRead)
                 val dataToWrite: ByteArray
                 val writeLen: Int
                 if (bytesRead % blockSize != 0) {
@@ -120,6 +127,35 @@ class RawImageBurner(
                     bytesPerSecond = 0.0,
                     etaSeconds = 0,
                     sha256Hex = finalHash,
+                    phase = BurnPhase.VERIFYING
+                )
+            )
+
+            coroutineContext.ensureActive()
+
+            withContext(Dispatchers.IO) {
+                val mbr = streamer.readSectors(0L, 1)
+                if (mbr.size < 512) {
+                    throw IllegalStateException("Read MBR returned incomplete sector: ${mbr.size} bytes")
+                }
+                val sig55 = mbr[510].toInt() and 0xFF
+                val sigAA = mbr[511].toInt() and 0xFF
+                val expected55 = firstSectorSig55 ?: 0x55
+                val expectedAA = firstSectorSigAA ?: 0xAA
+                if (sig55 != expected55 || sigAA != expectedAA) {
+                    throw IllegalStateException(
+                        "Invalid MBR boot signature at offset 510..511: expected 0x%02X 0x%02X, found 0x%02X 0x%02X".format(expected55, expectedAA, sig55, sigAA)
+                    )
+                }
+            }
+
+            emit(
+                BurnProgress(
+                    bytesWritten = bytesWrittenSoFar,
+                    totalBytes = totalBytes,
+                    bytesPerSecond = 0.0,
+                    etaSeconds = 0,
+                    sha256Hex = finalHash,
                     phase = BurnPhase.COMPLETED
                 )
             )
@@ -143,7 +179,8 @@ class RawImageBurner(
                     bytesPerSecond = 0.0,
                     etaSeconds = 0,
                     sha256Hex = "",
-                    phase = BurnPhase.FAILED
+                    phase = BurnPhase.FAILED,
+                    errorMessage = e.message ?: "Unknown write error"
                 )
             )
         } finally {
