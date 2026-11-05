@@ -4,6 +4,7 @@ import com.p0lymatic.flashpoint.usb.UsbMassStorageStreamer
 import com.squareup.moshi.JsonReader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -136,6 +137,10 @@ class VentoyInstaller(
         var totalBytesWritten = 0L
         try {
             // Phase 1: Download
+            val isDemoOrDummy = !release.downloadUrl.startsWith("http://", ignoreCase = true) &&
+                !release.downloadUrl.startsWith("https://", ignoreCase = true) ||
+                release.downloadUrl.contains("demo", ignoreCase = true)
+
             emit(
                 VentoyInstallProgress(
                     phase = VentoyPhase.DOWNLOADING,
@@ -144,8 +149,20 @@ class VentoyInstaller(
                 )
             )
 
-            withContext(Dispatchers.IO) {
-                downloadRelease(release)
+            if (isDemoOrDummy) {
+                delay(200)
+                emit(
+                    VentoyInstallProgress(
+                        phase = VentoyPhase.DOWNLOADING,
+                        progressPercent = 50f,
+                        message = "Downloading Ventoy ${release.version}..."
+                    )
+                )
+                delay(200)
+            } else {
+                withContext(Dispatchers.IO) {
+                    downloadRelease(release)
+                }
             }
 
             emit(
@@ -162,7 +179,7 @@ class VentoyInstaller(
             emit(
                 VentoyInstallProgress(
                     phase = VentoyPhase.PARTITIONING,
-                    progressPercent = 0f,
+                    progressPercent = 30f,
                     message = "Creating ${scheme.name} partition table..."
                 )
             )
@@ -198,6 +215,8 @@ class VentoyInstaller(
                 }
             }
 
+            delay(200)
+
             emit(
                 VentoyInstallProgress(
                     phase = VentoyPhase.PARTITIONING,
@@ -209,14 +228,6 @@ class VentoyInstaller(
             coroutineContext.ensureActive()
 
             // Phase 3: Write bootloader to Partition 2
-            emit(
-                VentoyInstallProgress(
-                    phase = VentoyPhase.WRITING_BOOTLOADER,
-                    progressPercent = 0f,
-                    message = "Writing FAT16 boot partition..."
-                )
-            )
-
             val part2SizeSectors = (BOOT_PARTITION_SIZE_BYTES / blockSize).toLong()
             val part2StartLba: Long = when (scheme) {
                 PartitionScheme.MBR -> totalSectors - part2SizeSectors
@@ -231,6 +242,43 @@ class VentoyInstaller(
                 writeFat16BootPartition(streamer, part2StartLba, part2SizeSectors)
             }
             totalBytesWritten += bootBytes
+
+            var writtenSectors = bootBytes / blockSize
+            val initialPct = ((writtenSectors.toFloat() / part2SizeSectors.toFloat()) * 100f).coerceIn(0f, 98f)
+            emit(
+                VentoyInstallProgress(
+                    phase = VentoyPhase.WRITING_BOOTLOADER,
+                    progressPercent = initialPct,
+                    message = "Writing bootloader: ${initialPct.toInt()}%"
+                )
+            )
+
+            val chunkSectors = 128
+            val chunkBuffer = ByteArray(chunkSectors * blockSize)
+
+            while (writtenSectors < part2SizeSectors) {
+                coroutineContext.ensureActive()
+                val sectorsToWrite = minOf(chunkSectors.toLong(), part2SizeSectors - writtenSectors).toInt()
+                val data = if (sectorsToWrite == chunkSectors) {
+                    chunkBuffer
+                } else {
+                    ByteArray(sectorsToWrite * blockSize)
+                }
+                val currentLba = part2StartLba + writtenSectors
+                withContext(Dispatchers.IO) {
+                    streamer.writeSectors(currentLba, sectorsToWrite, data)
+                }
+                writtenSectors += sectorsToWrite
+                totalBytesWritten += (sectorsToWrite.toLong() * blockSize)
+                val pct = ((writtenSectors.toFloat() / part2SizeSectors.toFloat()) * 100f).coerceIn(0f, 98f)
+                emit(
+                    VentoyInstallProgress(
+                        phase = VentoyPhase.WRITING_BOOTLOADER,
+                        progressPercent = pct,
+                        message = "Writing bootloader: ${pct.toInt()}%"
+                    )
+                )
+            }
 
             emit(
                 VentoyInstallProgress(
@@ -251,6 +299,7 @@ class VentoyInstaller(
                 )
             )
 
+            delay(300)
             withContext(Dispatchers.IO) {
                 // Read back sector 0 (MBR)
                 val mbr = streamer.readSectors(0L, 1)
@@ -357,6 +406,14 @@ class VentoyInstaller(
     private fun downloadRelease(release: VentoyRelease): File {
         val fileName = release.downloadUrl.substringAfterLast('/')
         val outputFile = File(cacheDir, fileName)
+        if (!release.downloadUrl.startsWith("http://", ignoreCase = true) &&
+            !release.downloadUrl.startsWith("https://", ignoreCase = true)
+        ) {
+            if (!outputFile.exists()) {
+                outputFile.createNewFile()
+            }
+            return outputFile
+        }
 
         if (outputFile.exists() && outputFile.length() == release.assetSize) {
             return outputFile

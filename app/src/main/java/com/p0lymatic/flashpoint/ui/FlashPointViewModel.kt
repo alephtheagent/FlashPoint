@@ -512,7 +512,7 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
                 _failedDetails.value = FailedDetails(
                     phase = "Ventoy Installation",
                     rawError = e.stackTraceToString().ifBlank { errMsg },
-                    driveName = (usbState.value as? UsbConnectionState.Connected)?.device?.productName ?: "USB Drive",
+                    driveName = devName,
                     imageName = "Ventoy ${release.version}"
                 )
                 cleanupVirtualDisk()
@@ -523,6 +523,7 @@ class FlashPointViewModel(application: Application) : AndroidViewModel(applicati
     fun cancelVentoyInstall() {
         ventoyJob?.cancel()
         ventoyJob = null
+        _ventoyInstallProgress.value = null
         cleanupVirtualDisk()
     }
 
